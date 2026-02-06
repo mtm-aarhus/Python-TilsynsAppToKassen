@@ -52,7 +52,7 @@ def process(orchestrator_connection: OrchestratorConnection, queue_element=None)
         start = item.get("Startdato")
         slut = item.get("Slutdato")
         cosmos_id_converted = convert_cosmos_id(item["id"])
-        print(f"Sending {cosmos_id} into vejmankassen")
+        orchestrator_connection.log_info(f"Sending {cosmos_id} into vejmankassen")
 
         # Determine price year from Startdato (YYYY-MM-DD)
         if not start:
@@ -117,7 +117,7 @@ def process(orchestrator_connection: OrchestratorConnection, queue_element=None)
 
         # 4. Delete old document
         container.delete_item(item=item_id, partition_key=old_status)
-        print("Marked as faktureret")
+        orchestrator_connection.log_info("Marked as faktureret")
 
 
 
