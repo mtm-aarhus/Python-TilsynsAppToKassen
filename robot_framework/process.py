@@ -53,7 +53,8 @@ def process(orchestrator_connection: OrchestratorConnection, queue_element=None)
         slut = item.get("Slutdato")
         cosmos_id_converted = convert_cosmos_id(item["id"])
         orchestrator_connection.log_info(f"Sending {cosmos_id} into vejmankassen")
-
+        pez_uuid = item.get("PEZUUID")  # may be None
+        
         # Determine price year from Startdato (YYYY-MM-DD)
         if not start:
             raise Exception(f"{cosmos_id}: Missing Startdato, cannot determine price year")
@@ -81,9 +82,9 @@ def process(orchestrator_connection: OrchestratorConnection, queue_element=None)
             INSERT INTO dbo.VejmanFakturering (
                 FørsteSted, Tilladelsesnr, Ansøger, CvrNr,
                 TilladelsesType, Enhedspris, Meter, Startdato, Slutdato,
-                VejmanFakturaID, FakturaStatus
+                VejmanFakturaID, FakturaStatus, PEZUUID
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         cursor.execute(
@@ -98,7 +99,8 @@ def process(orchestrator_connection: OrchestratorConnection, queue_element=None)
             start,
             slut,
             cosmos_id_converted,
-            "Ny"
+            "Ny",
+            pez_uuid
         )
         conn.commit()
 
