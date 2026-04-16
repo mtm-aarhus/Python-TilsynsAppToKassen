@@ -1,20 +1,19 @@
 """This module contains the main process of the robot."""
 from OpenOrchestrator.database.queues import QueueElement
-
-
 from OpenOrchestrator.orchestrator_connection.connection import OrchestratorConnection
 from azure.cosmos import CosmosClient
 import pyodbc
 
+
 def process(orchestrator_connection: OrchestratorConnection, queue_element=None):
     orchestrator_connection.log_trace("Running Fakturering export process.")
 
-    # --- Cosmos DB connection ---
+    # --- Cosmos DB connection (new unified container) ---
     cosmos_credentials = orchestrator_connection.get_credential("AAKTilsynDB")
     COSMOS_URL = cosmos_credentials.username
     COSMOS_KEY = cosmos_credentials.password
     DB_NAME = "aak-tilsyn"
-    CONTAINER = "henstillinger"
+    CONTAINER = "TilsynItems"
 
     client = CosmosClient(COSMOS_URL, COSMOS_KEY)
     container = client.get_database_client(DB_NAME).get_container_client(CONTAINER)
@@ -28,14 +27,9 @@ def process(orchestrator_connection: OrchestratorConnection, queue_element=None)
     # Preload unit prices (maintained by the other robot)
     unit_price_lookup = load_unit_prices(conn)
 
-
-    # --- Fetch pricebook ---
-    # token = orchestrator_connection.get_credential("VejmanToken").password
-    # pricebook_map = FetchPricebookData(token)
-
-    # --- Query all 'Til fakturering' rows ---
+    # --- Query all henstillinger with 'Til fakturering' ---
     rows = list(container.query_items(
-        query="SELECT * FROM c WHERE c.FakturaStatus = 'Til fakturering'",
+        query="SELECT * FROM c WHERE c.type = 'henstilling' AND c.FakturaStatus = 'Til fakturering'",
         enable_cross_partition_query=True
     ))
 
@@ -45,19 +39,19 @@ def process(orchestrator_connection: OrchestratorConnection, queue_element=None)
         cosmos_id = item["id"]
         henstilling_id = item["HenstillingId"]
         firma = item.get("FirmaNavn")
-        adresse = item.get("Adresse")
+        adresse = item.get("full_address") or item.get("Adresse")
         cvr = item.get("CVR")
         tilladelsestype = item.get("Tilladelsestype")
         meter = item.get("Kvadratmeter")
-        start = item.get("Startdato")
-        slut = item.get("Slutdato")
+        start = item.get("start_date") or item.get("Startdato")
+        slut = item.get("end_date") or item.get("Slutdato")
         cosmos_id_converted = convert_cosmos_id(item["id"])
         orchestrator_connection.log_info(f"Sending {cosmos_id} into vejmankassen")
-        pez_uuid = item.get("PEZUUID")  # may be None
-        
-        # Determine price year from Startdato (YYYY-MM-DD)
+        pez_uuid = item.get("PEZUUID")
+
+        # Determine price year from start date (YYYY-MM-DD)
         if not start:
-            raise Exception(f"{cosmos_id}: Missing Startdato, cannot determine price year")
+            raise Exception(f"{cosmos_id}: Missing start_date, cannot determine price year")
 
         price_year = int(start[:4])
         lookup_key = (price_year, tilladelsestype.strip().lower())
@@ -67,8 +61,7 @@ def process(orchestrator_connection: OrchestratorConnection, queue_element=None)
             raise Exception(
                 f"{cosmos_id}: No unit price found in dbo.VejmanEnhedsPriser for "
                 f"PriceYear={price_year}, PricebookText='{tilladelsestype}'"
-    )
-
+            )
 
         # --- Check if already exists in SQL ---
         cursor.execute("SELECT COUNT(*) FROM dbo.VejmanFakturering WHERE VejmanFakturaID = ?", cosmos_id_converted)
@@ -104,32 +97,19 @@ def process(orchestrator_connection: OrchestratorConnection, queue_element=None)
         )
         conn.commit()
 
-        old_status = item["FakturaStatus"]
-        new_status = "Faktureret"
-        item_id = item["id"]
-
-        # 1. Read item from old partition
-        old_doc = container.read_item(item=item_id, partition_key=old_status)
-
-        # 2. Update fields
-        old_doc["FakturaStatus"] = new_status
-
-        # 3. Create new document in new partition
-        container.create_item(body=old_doc)
-
-        # 4. Delete old document
-        container.delete_item(item=item_id, partition_key=old_status)
-        orchestrator_connection.log_info("Marked as faktureret")
-
+        # New container uses partition key /id — no cross-partition move needed.
+        # Just update FakturaStatus in-place.
+        item["FakturaStatus"] = "Faktureret"
+        container.replace_item(item=cosmos_id, body=item)
+        orchestrator_connection.log_info(f"Marked {cosmos_id} as Faktureret")
 
 
 def convert_cosmos_id(cosmos_id: str) -> str:
     if "_" not in cosmos_id:
-        return cosmos_id  # already clean
+        return cosmos_id
 
     left, right = cosmos_id.split("_", 1)
 
-    # Pad with 1 zero if < 10
     if right.isdigit() and int(right) < 10:
         right = f"0{int(right)}"
     else:
@@ -137,10 +117,10 @@ def convert_cosmos_id(cosmos_id: str) -> str:
 
     return f"{left}{right}"
 
+
 def load_unit_prices(conn) -> dict[tuple[int, str], float]:
     """
     Load all unit prices from dbo.VejmanEnhedsPriser into memory.
-
     Key: (PriceYear, pricebook_text_lower)
     Value: UnitPrice
     """
